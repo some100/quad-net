@@ -2,10 +2,9 @@ use std::net::ToSocketAddrs;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod tcp;
+use crate::error::Error;
 #[cfg(target_arch = "wasm32")]
 use crate::web_socket::js_web_socket as websocket;
-
-use crate::error::Error;
 
 pub struct QuadSocket {
     #[cfg(not(target_arch = "wasm32"))]

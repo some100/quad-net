@@ -57,8 +57,10 @@ pub(crate) mod js_web_socket {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod pc_web_socket {
-    use std::net::ToSocketAddrs;
-    use std::sync::{mpsc, Mutex};
+    use std::{
+        net::ToSocketAddrs,
+        sync::{mpsc, Mutex},
+    };
 
     use crate::error::Error;
 
@@ -152,6 +154,5 @@ mod pc_web_socket {
 
 #[cfg(target_arch = "wasm32")]
 pub use js_web_socket::WebSocket;
-
 #[cfg(not(target_arch = "wasm32"))]
 pub use pc_web_socket::WebSocket;

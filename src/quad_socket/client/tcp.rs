@@ -1,7 +1,7 @@
-use std::net::ToSocketAddrs;
-
-use std::net::TcpStream;
-use std::sync::mpsc::{self, Receiver};
+use std::{
+    net::{TcpStream, ToSocketAddrs},
+    sync::mpsc::{self, Receiver},
+};
 
 use crate::{error::Error, quad_socket::protocol::MessageReader};
 

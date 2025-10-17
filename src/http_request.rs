@@ -14,6 +14,7 @@ pub enum Method {
 #[derive(Debug)]
 pub enum HttpError {
     IOError,
+    NotStrError,
     #[cfg(not(target_arch = "wasm32"))]
     UreqError(ureq::Error),
 }
@@ -22,8 +23,9 @@ impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HttpError::IOError => write!(f, "IOError"),
+            HttpError::NotStrError => write!(f, "Received bytes that were not a string"),
             #[cfg(not(target_arch = "wasm32"))]
-            HttpError::UreqError(error) => write!(f, "Ureq error: {}", error),
+            HttpError::UreqError(error) => write!(f, "Ureq error: {error}"),
         }
     }
 }
@@ -48,13 +50,21 @@ extern "C" {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Request {
-    rx: std::sync::mpsc::Receiver<Result<String, HttpError>>,
+    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, HttpError>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Request {
-    pub fn try_recv(&mut self) -> Option<Result<String, HttpError>> {
-        self.rx.try_recv().ok()
+    pub fn try_recv_str(&mut self) -> Option<Result<String, HttpError>> {
+        match self.rx.try_recv() {
+            Ok(Ok(res)) => Some(String::from_utf8(res).map_err(|_| HttpError::NotStrError)),
+            Ok(Err(e)) => Some(Err(e)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn try_recv_bytes(&mut self) -> Option<Vec<u8>> {
+        Some(self.rx.try_recv().ok()?.ok()?)
     }
 }
 
@@ -65,18 +75,31 @@ pub struct Request {
 
 #[cfg(target_arch = "wasm32")]
 impl Request {
-    pub fn try_recv(&mut self) -> Option<Result<String, HttpError>> {
+    pub fn try_recv_str(&mut self) -> Option<Result<String, HttpError>> {
         let js_obj = unsafe { http_try_recv(self.cid) };
 
         if js_obj.is_nil() == false {
             let mut buf = vec![];
             js_obj.to_byte_buffer(&mut buf);
 
-            let res = std::str::from_utf8(&buf).unwrap().to_owned();
-            return Some(Ok(res));
+            let res = String::from_utf8(buf).map_err(|_| HttpError::NotStrError);
+            Some(res)
+        } else {
+            None
         }
+    }
 
-        None
+    pub fn try_recv_bytes(&mut self) -> Option<Vec<u8>> {
+        let js_obj = unsafe { http_try_recv(self.cid) };
+
+        if js_obj.is_nil() == false {
+            let mut buf = vec![];
+            js_obj.to_byte_buffer(&mut buf);
+
+            Some(buf)
+        } else {
+            None
+        }
     }
 }
 
@@ -84,24 +107,26 @@ pub struct RequestBuilder {
     url: String,
     method: Method,
     headers: Vec<(String, String)>,
+    query: Vec<(String, String)>,
     body: Option<String>,
 }
 
 impl RequestBuilder {
-    pub fn new(url: &str) -> RequestBuilder {
-        RequestBuilder {
+    pub fn new(url: &str) -> Self {
+        Self {
             url: url.to_owned(),
             method: Method::Get,
             headers: vec![],
+            query: vec![],
             body: None,
         }
     }
 
-    pub fn method(self, method: Method) -> RequestBuilder {
+    pub fn method(self, method: Method) -> Self {
         Self { method, ..self }
     }
 
-    pub fn header(mut self, header: &str, value: &str) -> RequestBuilder {
+    pub fn header(mut self, header: &str, value: &str) -> Self {
         self.headers.push((header.to_owned(), value.to_owned()));
 
         Self {
@@ -110,8 +135,17 @@ impl RequestBuilder {
         }
     }
 
-    pub fn body(self, body: &str) -> RequestBuilder {
-        RequestBuilder {
+    pub fn query(mut self, key: &str, value: &str) -> Self {
+        self.query.push((key.to_owned(), value.to_owned()));
+
+        Self {
+            query: self.query,
+            ..self
+        }
+    }
+
+    pub fn body(self, body: &str) -> Self {
+        Self {
             body: Some(body.to_owned()),
             ..self
         }
@@ -124,24 +158,28 @@ impl RequestBuilder {
         let (tx, rx) = channel();
 
         std::thread::spawn(move || {
-            let method = match self.method {
-                Method::Post => ureq::post,
-                Method::Put => ureq::put,
-                Method::Get => ureq::get,
-                Method::Delete => ureq::delete,
+            let mut request = match self.method {
+                Method::Post => ureq::post(&self.url),
+                Method::Put => ureq::put(&self.url),
+                Method::Get => ureq::get(&self.url).force_send_body(),
+                Method::Delete => ureq::delete(&self.url).force_send_body(),
             };
 
-            let mut request = method(&self.url);
             for (header, value) in self.headers {
-                request = request.set(&header, &value)
+                request = request.header(header, value);
             }
-            let response: Result<String, HttpError> = if let Some(body) = self.body {
-                request.send_string(&body)
+
+            for (key, value) in self.query {
+                request = request.query(key, value);
+            }
+
+            let response: Result<_, HttpError> = if let Some(body) = self.body {
+                request.send(&body)
             } else {
-                request.call()
+                request.send_empty()
             }
             .map_err(|err| err.into())
-            .and_then(|response| response.into_string().map_err(|err| err.into()));
+            .and_then(|response| response.into_body().read_to_vec().map_err(|err| err.into()));
 
             tx.send(response).unwrap();
         });
@@ -164,10 +202,23 @@ impl RequestBuilder {
             headers.set_field_string(&header, &value);
         }
 
+        let mut url = self.url.clone();
+
+        if !self.query.is_empty() {
+            let query = self
+                .query
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<String>>()
+                .join("&");
+
+            url = format!("{url}?{query}");
+        }
+
         let cid = unsafe {
             http_make_request(
                 scheme,
-                JsObject::string(&self.url),
+                JsObject::string(&url),
                 JsObject::string(&self.body.as_ref().map(|s| s.as_str()).unwrap_or("")),
                 headers,
             )

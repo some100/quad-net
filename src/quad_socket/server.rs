@@ -1,8 +1,8 @@
-use std::net::ToSocketAddrs;
-use std::net::{TcpListener, TcpStream};
-use std::time::{Duration, Instant};
-
-use std::sync::{Arc, Mutex};
+use std::{
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use super::protocol::MessageReader;
 

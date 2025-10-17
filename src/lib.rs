@@ -11,5 +11,5 @@ pub mod web_socket;
 
 #[no_mangle]
 pub extern "C" fn quad_net_crate_version() -> u32 {
-	1
+    1
 }
